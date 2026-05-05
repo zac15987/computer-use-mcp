@@ -653,7 +653,7 @@ test('Feature: v5-accessible-ui-automation, Property 14: spaces unsupported degr
   const native = createMockNative()
   native._setCreateAgentSpaceResult(() => ({ supported: false, reason: 'api_unavailable' }))
   native._setMoveWindowToSpaceResult(() => ({ moved: false, reason: 'api_unavailable' }))
-  const session = createSession({ native })
+  const session = createSession({ native, spawnBounded: mockSpawnBounded(new Map()) })
 
   const r1 = await session.dispatch('create_agent_space', {})
   assert.ok(r1.isError)
@@ -674,7 +674,7 @@ test('create_agent_space caches a supported result', async () => {
     invocations++
     return { supported: true, spaceId: 42 }
   })
-  const session = createSession({ native })
+  const session = createSession({ native, spawnBounded: mockSpawnBounded(new Map()) })
   const r1 = await session.dispatch('create_agent_space', {})
   const r2 = await session.dispatch('create_agent_space', {})
   assert.equal(invocations, 1, 'native createAgentSpace should be called once, then cached')
@@ -684,6 +684,38 @@ test('create_agent_space caches a supported result', async () => {
   assert.equal(b2.space_id, 42)
   assert.equal(b1.created, true)
   assert.equal(b2.created, false)
+})
+
+test('create_agent_space reports yabai scripting-addition setup requirement', async () => {
+  const previousBackend = process.env.COMPUTER_USE_SPACES_BACKEND
+  process.env.COMPUTER_USE_SPACES_BACKEND = 'yabai'
+  try {
+    const native = createMockNative()
+    const spaces = JSON.stringify([{ id: 1, index: 1 }])
+    const responses = new Map([
+      ['yabai --version', { stdout: 'yabai-v7.1.24\n', stderr: '', code: 0, timedOut: false }],
+      ['yabai -m query --spaces', { stdout: spaces, stderr: '', code: 0, timedOut: false }],
+      ['yabai -m space --create', {
+        stdout: '',
+        stderr: 'cannot create space due to an error with the scripting-addition.\n',
+        code: 1,
+        timedOut: false,
+      }],
+    ])
+    const session = createSession({ native, spawnBounded: mockSpawnBounded(responses) })
+
+    const r = await session.dispatch('create_agent_space', {})
+    assert.ok(r.isError)
+    const body = JSON.parse(r.content[0].text)
+    assert.equal(body.backend, 'yabai')
+    assert.equal(body.requires_scripting_addition, true)
+    assert.deepEqual(body.setup_commands, ['sudo yabai --load-sa'])
+    assert.equal(body.before_count, 1)
+    assert.equal(body.after_count, 1)
+  } finally {
+    if (previousBackend === undefined) delete process.env.COMPUTER_USE_SPACES_BACKEND
+    else process.env.COMPUTER_USE_SPACES_BACKEND = previousBackend
+  }
 })
 
 // ── Example: click_element fallback to coordinate click ──────────────────────

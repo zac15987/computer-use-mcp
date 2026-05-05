@@ -275,18 +275,22 @@ export function createComputerUseServer(opts: ServerOptions = {}): McpServer {
     bundle_id: z.string().describe('Bundle ID to probe'),
   }, AX_READ)
 
-  // ── v5: Agent Spaces (read-only) ─────────────────────────────────────────
-  // NOTE: Space *mutation* tools (create/move/remove/destroy) are disabled.
-  // CGS-created Spaces are orphaned on SIP-enabled Macs (not visible in
-  // Mission Control) and window moves silently no-op without elevated
-  // entitlements. The gesture-based Mission Control "+" click approach is
-  // unreliable (coordinate guessing) and the AX approach could not locate
-  // the button in Dock's tree. Dispatch + native code remain in place for
-  // possible future revival, but they are not exposed via MCP.
+  // ── v5: Agent Spaces ────────────────────────────────────────────────────
+  // macOS Space mutation uses best-effort backends selected by
+  // COMPUTER_USE_SPACES_BACKEND: yabai, Mission Control gestures, then CGS.
+  // CGS-created Spaces can be orphaned on SIP-enabled Macs.
   tool('list_spaces', 'List user Spaces grouped by display. Always works — pure read via CGS.', {}, NONE_READ)
   tool('get_active_space', 'Get the currently active Space ID.', {}, NONE_READ)
-  tool('create_agent_space', 'Create a new virtual desktop/Space. On Windows uses Ctrl+Win+D keyboard shortcut. Returns the new desktop info.', {}, AX_MUT)
-  tool('destroy_space', 'Close the current virtual desktop/Space. On Windows uses Ctrl+Win+F4. Windows on the closed desktop move to the adjacent one.', {
+  tool('create_agent_space', 'Create a new virtual desktop/Space. On macOS, auto-selects yabai, Mission Control gesture automation, or CGS fallback. On Windows uses Ctrl+Win+D keyboard shortcut.', {}, AX_MUT)
+  tool('move_window_to_space', 'Move a window to a virtual desktop/Space. On macOS, prefers yabai and falls back to private CGS APIs.', {
+    window_id: z.number().int().describe('Window ID to move'),
+    space_id: z.number().int().describe('Target Space/desktop ID'),
+  }, AX_MUT)
+  tool('remove_window_from_space', 'Remove a window from a virtual desktop/Space. Best effort on macOS because private CGS APIs may no-op without elevated entitlements.', {
+    window_id: z.number().int().describe('Window ID to remove'),
+    space_id: z.number().int().describe('Space/desktop ID to remove the window from'),
+  }, AX_MUT)
+  tool('destroy_space', 'Close a virtual desktop/Space. On macOS, prefers yabai and falls back to private CGS APIs. On Windows uses Ctrl+Win+F4.', {
     space_id: z.number().int().optional().describe('Space ID to destroy (ignored on Windows — always closes current)'),
   }, AX_MUT)
 

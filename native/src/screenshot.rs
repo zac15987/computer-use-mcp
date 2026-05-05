@@ -125,25 +125,42 @@ mod macos {
         if let Some(w) = width {
             let _ = Command::new("sips").args(["--resampleWidth", &w.to_string(), &tmp]).output();
         }
+        let wants_png = quality == Some(0);
         let q = quality.unwrap_or(80).clamp(1, 100);
-        if q != 85 {
+        if !wants_png && q != 85 {
             let _ = Command::new("sips").args(["--setProperty", "formatOptions", &q.to_string(), &tmp]).output();
         }
 
-        let data = std::fs::read(&tmp).map_err(|e| napi::Error::from_reason(format!("read: {e}")))?;
+        let captured = std::fs::read(&tmp).map_err(|e| napi::Error::from_reason(format!("read: {e}")))?;
         let _ = std::fs::remove_file(&tmp);
 
-        let (w, h) = jpeg_dimensions(&data).unwrap_or((0, 0));
+        let (data, mime_type, w, h) = if wants_png {
+            use image::io::Reader as ImageReader;
+            use std::io::Cursor;
+            let img = ImageReader::new(Cursor::new(&captured))
+                .with_guessed_format()
+                .map_err(|e| napi::Error::from_reason(format!("image format: {e}")))?
+                .decode()
+                .map_err(|e| napi::Error::from_reason(format!("image decode: {e}")))?;
+            let rgb = img.to_rgb8();
+            let w = rgb.width();
+            let h = rgb.height();
+            (encode_png_mac(&rgb.into_raw(), w, h)?, "image/png", w, h)
+        } else {
+            let (w, h) = jpeg_dimensions(&captured).unwrap_or((0, 0));
+            (captured, "image/jpeg", w, h)
+        };
+
         let mut hasher = DefaultHasher::new();
         data.hash(&mut hasher);
         let hash = format!("{:016x}", hasher.finish());
 
         if previous_hash.as_deref() == Some(hash.as_str()) {
-            return Ok(serde_json::json!({ "width": w, "height": h, "mimeType": "image/jpeg", "hash": hash, "unchanged": true }));
+            return Ok(serde_json::json!({ "width": w, "height": h, "mimeType": mime_type, "hash": hash, "unchanged": true }));
         }
 
         let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
-        Ok(serde_json::json!({ "base64": b64, "width": w, "height": h, "mimeType": "image/jpeg", "hash": hash, "unchanged": false }))
+        Ok(serde_json::json!({ "base64": b64, "width": w, "height": h, "mimeType": mime_type, "hash": hash, "unchanged": false }))
     }
 
     fn jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {

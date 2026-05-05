@@ -62,6 +62,29 @@ test('Phase 1: mutating tool acquires + releases the lock, observation tool does
   assert.equal(fs.existsSync(lockPath), false, 'lockfile must be gone after mutating tool completes')
 })
 
+test('Phase 1: batch mutating tools are also lock protected', async () => {
+  const lockPath = newLockPath()
+  const s = createSession({ native: createMockNative(), lockPath, ...LOCK_ON })
+
+  const p = s.dispatch('multi_select', {
+    locs: [[10, 10]],
+    press_ctrl: false,
+    focus_strategy: 'none',
+  })
+
+  let sawLock = false
+  for (let i = 0; i < 50; i++) {
+    if (fs.existsSync(lockPath)) {
+      sawLock = true
+      break
+    }
+    await new Promise(r => setTimeout(r, 2))
+  }
+  await p
+  assert.equal(sawLock, true, 'multi_select should hold the lock while dispatching')
+  assert.equal(fs.existsSync(lockPath), false, 'lockfile must be gone after multi_select completes')
+})
+
 // ── Lockfile holder PID is the current process (observed mid-flight) ────────
 
 test('Phase 1: lockfile holder PID is this process', async () => {
