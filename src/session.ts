@@ -584,11 +584,15 @@ const MUTATING_TOOLS = new Set([
   // Pointer + keyboard CGEvent
   'left_click', 'right_click', 'middle_click', 'double_click', 'triple_click',
   'mouse_move', 'left_click_drag', 'left_mouse_down', 'left_mouse_up', 'scroll',
-  'type', 'key', 'hold_key', 'write_clipboard',
+  'type', 'key', 'hold_key', 'write_clipboard', 'multi_select', 'multi_edit',
   // App / window activation
   'activate_app', 'activate_window', 'open_application', 'hide_app', 'unhide_app',
   // Semantic AX mutations
   'click_element', 'set_value', 'press_button', 'select_menu_item', 'fill_form',
+  // Space/desktop mutation
+  'create_agent_space', 'move_window_to_space', 'remove_window_from_space', 'destroy_space',
+  // Files, processes, registry, and notifications can all mutate host state
+  'filesystem', 'process_kill', 'registry', 'notification',
   // Scripting bridge (can mutate via AppleScript — treat conservatively)
   'run_script',
 ])
@@ -970,6 +974,193 @@ export function createSession(opts: SessionOptions = {}): Session {
     return _psExe
   }
 
+  type MacSpacesBackend = 'auto' | 'yabai' | 'mission_control' | 'cgs'
+
+  function getMacSpacesBackend(): MacSpacesBackend {
+    const raw = (process.env.COMPUTER_USE_SPACES_BACKEND ?? 'auto').toLowerCase()
+    if (raw === 'yabai' || raw === 'mission_control' || raw === 'cgs') return raw
+    return 'auto'
+  }
+
+  async function yabaiAvailable(): Promise<boolean> {
+    if (IS_WINDOWS) return false
+    const r = await spawnBounded('yabai', ['--version'], 3_000)
+    return r.code === 0
+  }
+
+  async function yabaiJson(args: string[], timeoutMs = 5_000): Promise<unknown | undefined> {
+    const r = await spawnBounded('yabai', args, timeoutMs)
+    if (r.code !== 0) return undefined
+    try { return JSON.parse(r.stdout) } catch { return undefined }
+  }
+
+  async function yabaiSpaces(): Promise<Array<Record<string, unknown>>> {
+    const raw = await yabaiJson(['-m', 'query', '--spaces'])
+    return Array.isArray(raw) ? raw as Array<Record<string, unknown>> : []
+  }
+
+  function yabaiFailure(error: string, reason: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+    const normalizedReason = reason.trim() || error
+    const requiresScriptingAddition = /scripting[- ]addition/i.test(normalizedReason)
+    return {
+      error,
+      reason: normalizedReason,
+      backend: 'yabai',
+      ...(requiresScriptingAddition ? {
+        requires_scripting_addition: true,
+        setup_commands: ['sudo yabai --load-sa'],
+        sip_note: 'On SIP-enabled Macs, yabai scripting-addition setup can require Recovery-mode SIP configuration before load succeeds. Run the command with --load-sa; running yabai as root without that flag is intentionally rejected.',
+      } : {}),
+      ...extra,
+    }
+  }
+
+  async function tryCreateSpaceWithYabai(): Promise<Record<string, unknown> | undefined> {
+    if (!(await yabaiAvailable())) return undefined
+    const before = await yabaiSpaces()
+    const beforeIds = new Set(before.map(s => s.id).filter(id => typeof id === 'number'))
+    const r = await spawnBounded('yabai', ['-m', 'space', '--create'], 10_000)
+    await sleep(700)
+    const after = await yabaiSpaces()
+    const created = after.find(s => typeof s.id === 'number' && !beforeIds.has(s.id))
+    if (r.code !== 0 || !created) {
+      return yabaiFailure('yabai_create_failed', r.stderr || r.stdout || 'no_new_space_detected', {
+        before_count: before.length,
+        after_count: after.length,
+      })
+    }
+    return {
+      supported: true,
+      backend: 'yabai',
+      spaceId: created?.id,
+      index: created?.index,
+      uuid: created?.uuid,
+      created: Boolean(created),
+      attached: true,
+      note: 'Created visible Space via yabai.',
+    }
+  }
+
+  async function tryCreateSpaceWithMissionControl(): Promise<Record<string, unknown> | undefined> {
+    if (IS_WINDOWS || typeof n.listSpaces !== 'function') return undefined
+    const before = n.listSpaces()
+    const beforeList = Array.isArray(before.displays)
+      ? before.displays.flatMap((d: any) => Array.isArray(d.spaces) ? d.spaces : [])
+      : []
+    const beforeIds = new Set(beforeList.map((s: any) => s.id))
+    const display = n.getDisplaySize()
+    if (!display.width || !display.height) return undefined
+
+    const candidates = [
+      [Math.max(0, display.width - 33), 72],
+      [Math.max(0, display.width - 60), 85],
+      [Math.max(0, display.width - 80), 85],
+      [Math.max(0, display.width - 120), 72],
+    ] as Array<[number, number]>
+
+    let afterList: any[] = beforeList
+    let created: any | undefined
+    for (const [clickX, clickY] of candidates) {
+      await spawnBounded('open', ['-a', 'Mission Control'], 5_000)
+      await sleep(1_500)
+      n.mouseMove(Math.round(display.width / 2), 200)
+      await sleep(700)
+      n.mouseMove(clickX, 200)
+      await sleep(300)
+      n.mouseMove(clickX, clickY)
+      await sleep(900)
+      n.mouseClick(clickX, clickY, 'left', 1)
+      await sleep(1_400)
+      n.keyPress('control+up')
+      await sleep(1_200)
+
+      const after = n.listSpaces()
+      afterList = Array.isArray(after.displays)
+        ? after.displays.flatMap((d: any) => Array.isArray(d.spaces) ? d.spaces : [])
+        : []
+      created = afterList.find((s: any) => !beforeIds.has(s.id))
+      if (created) break
+    }
+
+    if (!created) return {
+      error: 'mission_control_create_failed',
+      backend: 'mission_control',
+      beforeCount: beforeList.length,
+      afterCount: afterList.length,
+      reason: 'space_count_unchanged',
+    }
+
+    return {
+      supported: true,
+      backend: 'mission_control',
+      spaceId: created.id,
+      uuid: created.uuid,
+      created: true,
+      attached: true,
+      note: 'Created visible Space via Mission Control gesture.',
+    }
+  }
+
+  async function createMacSpace(): Promise<Record<string, unknown>> {
+    const backend = getMacSpacesBackend()
+    if (backend === 'yabai' || backend === 'auto') {
+      const y = await tryCreateSpaceWithYabai()
+      if (y && !('error' in y)) return y
+      if (backend === 'yabai') return y ?? { error: 'yabai_unavailable', backend: 'yabai' }
+    }
+    if (backend === 'mission_control' || backend === 'auto') {
+      const mc = await tryCreateSpaceWithMissionControl()
+      if (mc && !('error' in mc)) return mc
+      if (backend === 'mission_control') return mc ?? { error: 'mission_control_unavailable', backend: 'mission_control' }
+    }
+    const cgs = n.createAgentSpace()
+    return { ...cgs, backend: 'cgs_internal' }
+  }
+
+  async function moveMacWindowToSpace(windowId: number, spaceId: number): Promise<Record<string, unknown>> {
+    const backend = getMacSpacesBackend()
+    if (backend === 'yabai' || backend === 'auto') {
+      if (await yabaiAvailable()) {
+        const spaces = await yabaiSpaces()
+        const target = spaces.find(s => s.id === spaceId)
+        const selector = target?.index ?? spaceId
+        try { n.activateWindow(windowId) } catch { /* best effort */ }
+        await sleep(250)
+        const r = await spawnBounded('yabai', ['-m', 'window', '--space', String(selector)], 10_000)
+        if (r.code === 0) {
+          return { moved: true, verified: true, backend: 'yabai', window_id: windowId, space_id: spaceId, selector }
+        }
+        if (backend === 'yabai') {
+          return { moved: false, ...yabaiFailure('yabai_move_failed', r.stderr || r.stdout || 'yabai_move_failed') }
+        }
+      } else if (backend === 'yabai') {
+        return { moved: false, reason: 'yabai_unavailable', backend: 'yabai' }
+      }
+    }
+    const r = n.moveWindowToSpace(windowId, spaceId)
+    return { ...r, backend: 'cgs_internal' }
+  }
+
+  async function destroyMacSpace(spaceId: number): Promise<Record<string, unknown>> {
+    const backend = getMacSpacesBackend()
+    if (backend === 'yabai' || backend === 'auto') {
+      if (await yabaiAvailable()) {
+        const spaces = await yabaiSpaces()
+        const target = spaces.find(s => s.id === spaceId)
+        const selector = target?.index ?? spaceId
+        const r = await spawnBounded('yabai', ['-m', 'space', String(selector), '--destroy'], 10_000)
+        if (r.code === 0) return { destroyed: true, backend: 'yabai', space_id: spaceId, selector }
+        if (backend === 'yabai') {
+          return { destroyed: false, ...yabaiFailure('yabai_destroy_failed', r.stderr || r.stdout || 'yabai_destroy_failed') }
+        }
+      } else if (backend === 'yabai') {
+        return { destroyed: false, reason: 'yabai_unavailable', backend: 'yabai' }
+      }
+    }
+    const r = n.destroySpace(spaceId)
+    return { ...r, backend: 'cgs_internal' }
+  }
+
   async function runScriptHelper(
     language: string,
     script: string,
@@ -1000,6 +1191,28 @@ export function createSession(opts: SessionOptions = {}): Session {
       ? ['-l', 'JavaScript', '-e', script]
       : ['-e', script]
     return spawnBounded('osascript', args, timeoutMs)
+  }
+
+  function powershellLiteral(value: string): string {
+    return `'${value.replace(/'/g, "''")}'`
+  }
+
+  function powershellEncodedArgs(script: string): string[] {
+    return [
+      '-NoProfile',
+      '-NonInteractive',
+      '-EncodedCommand',
+      Buffer.from(script, 'utf16le').toString('base64'),
+    ]
+  }
+
+  function xmlEscape(value: string): string {
+    return value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;')
   }
 
   // ── Coordinate validation ─────────────────────────────────────────────
@@ -1951,16 +2164,22 @@ export function createSession(opts: SessionOptions = {}): Session {
               cached: true,
             }))
           }
-          const r = n.createAgentSpace()
-          if (!r.supported) {
+          const r = await createMacSpace()
+          if ('error' in r || r.supported === false) {
             return {
               content: [{
                 type: 'text',
                 text: JSON.stringify({
                   error: 'spaces_api_unavailable',
-                  reason: r.reason ?? 'api_unavailable',
+                  reason: r.reason ?? r.error ?? 'api_unavailable',
+                  backend: r.backend,
+                  requires_scripting_addition: r.requires_scripting_addition,
+                  setup_commands: r.setup_commands,
+                  sip_note: r.sip_note,
+                  before_count: r.before_count,
+                  after_count: r.after_count,
                   workaround:
-                    'Programmatic Space creation is not available on this macOS version. Use Control+Arrow to switch between user Spaces, or run the agent in the current Space.',
+                    'Install/start yabai, grant Accessibility, and install/load yabai scripting-addition for visible Space create/destroy. Alternatively allow Mission Control gesture automation. CGS-only Space creation can be orphaned on SIP-enabled Macs.',
                 }),
               }],
               isError: true,
@@ -1969,8 +2188,11 @@ export function createSession(opts: SessionOptions = {}): Session {
           if (typeof r.spaceId === 'number') cachedAgentSpaceId = r.spaceId
           return ok(JSON.stringify({
             space_id: r.spaceId,
-            created: true,
+            created: r.created ?? true,
             attached: r.attached ?? false,
+            backend: r.backend,
+            index: r.index,
+            uuid: r.uuid,
             note: r.note,
           }))
         }
@@ -1980,7 +2202,7 @@ export function createSession(opts: SessionOptions = {}): Session {
           const spaceId = num('space_id', -1)
           if (wid < 0) throw new Error('Invalid window_id: expected number')
           if (spaceId < 0) throw new Error('Invalid space_id: expected number')
-          const r = n.moveWindowToSpace(wid, spaceId)
+          const r = await moveMacWindowToSpace(wid, spaceId)
           if (!r.moved) {
             return {
               content: [{
@@ -1989,6 +2211,10 @@ export function createSession(opts: SessionOptions = {}): Session {
                   error: r.reason ?? 'move_failed',
                   window_id: wid,
                   space_id: spaceId,
+                  backend: r.backend,
+                  requires_scripting_addition: r.requires_scripting_addition,
+                  setup_commands: r.setup_commands,
+                  sip_note: r.sip_note,
                 }),
               }],
               isError: true,
@@ -1999,6 +2225,8 @@ export function createSession(opts: SessionOptions = {}): Session {
             space_id: spaceId,
             moved: true,
             verified: r.verified ?? false,
+            backend: r.backend,
+            selector: r.selector,
             window_on_screen_before: r.window_on_screen_before,
             window_on_screen_after: r.window_on_screen_after,
             note: r.note,
@@ -2042,15 +2270,21 @@ export function createSession(opts: SessionOptions = {}): Session {
 
           const spaceId = num('space_id', -1)
           if (spaceId < 0) throw new Error('Invalid space_id: expected number')
-          const r = n.destroySpace(spaceId)
+          const r = await destroyMacSpace(spaceId)
           if (!r.destroyed) {
             return {
-              content: [{ type: 'text', text: JSON.stringify({ error: r.reason ?? 'destroy_failed' }) }],
+              content: [{ type: 'text', text: JSON.stringify({
+                error: r.reason ?? 'destroy_failed',
+                backend: r.backend,
+                requires_scripting_addition: r.requires_scripting_addition,
+                setup_commands: r.setup_commands,
+                sip_note: r.sip_note,
+              }) }],
               isError: true,
             }
           }
           if (cachedAgentSpaceId === spaceId) cachedAgentSpaceId = undefined
-          return ok(JSON.stringify({ space_id: spaceId, destroyed: true }))
+          return ok(JSON.stringify({ space_id: spaceId, destroyed: true, backend: r.backend, selector: r.selector }))
         }
 
         // ── New Windows-parity tools ──────────────────────────────────────
@@ -2185,27 +2419,29 @@ export function createSession(opts: SessionOptions = {}): Session {
           switch (mode) {
             case 'get': {
               if (!name) return { content: [{ type: 'text', text: 'name required for get' }], isError: true }
-              const r = await spawnBounded(psExe, ['-NoProfile', '-NonInteractive', '-Command', `Get-ItemPropertyValue -Path '${regPath}' -Name '${name}'`], 10000)
+              const ps = `Get-ItemPropertyValue -Path ${powershellLiteral(regPath)} -Name ${powershellLiteral(name)}`
+              const r = await spawnBounded(psExe, powershellEncodedArgs(ps), 10000)
               return r.code === 0 ? ok(r.stdout.trim()) : { content: [{ type: 'text', text: r.stderr }], isError: true }
             }
             case 'set': {
               if (!name) return { content: [{ type: 'text', text: 'name required for set' }], isError: true }
               const val = typeof args.value === 'string' ? args.value : ''
               const type = typeof args.type === 'string' ? args.type : 'String'
-              const r = await spawnBounded(psExe, ['-NoProfile', '-NonInteractive', '-Command',
-                `New-ItemProperty -Path '${regPath}' -Name '${name}' -Value '${val}' -PropertyType ${type} -Force`], 10000)
+              const ps = `New-ItemProperty -Path ${powershellLiteral(regPath)} -Name ${powershellLiteral(name)} -Value ${powershellLiteral(val)} -PropertyType ${type} -Force`
+              const r = await spawnBounded(psExe, powershellEncodedArgs(ps), 10000)
               return r.code === 0 ? ok(`Set ${regPath}\\${name}`) : { content: [{ type: 'text', text: r.stderr }], isError: true }
             }
             case 'delete': {
               const cmd = name
-                ? `Remove-ItemProperty -Path '${regPath}' -Name '${name}' -Force`
-                : `Remove-Item -Path '${regPath}' -Recurse -Force`
-              const r = await spawnBounded(psExe, ['-NoProfile', '-NonInteractive', '-Command', cmd], 10000)
+                ? `Remove-ItemProperty -Path ${powershellLiteral(regPath)} -Name ${powershellLiteral(name)} -Force`
+                : `Remove-Item -Path ${powershellLiteral(regPath)} -Recurse -Force`
+              const r = await spawnBounded(psExe, powershellEncodedArgs(cmd), 10000)
               return r.code === 0 ? ok(`Deleted ${name ? `${regPath}\\${name}` : regPath}`) : { content: [{ type: 'text', text: r.stderr }], isError: true }
             }
             case 'list': {
-              const r = await spawnBounded(psExe, ['-NoProfile', '-NonInteractive', '-Command',
-                `Get-Item -Path '${regPath}' | Select-Object -ExpandProperty Property; Get-ChildItem -Path '${regPath}' -Name`], 10000)
+              const psPath = powershellLiteral(regPath)
+              const ps = `Get-Item -Path ${psPath} | Select-Object -ExpandProperty Property; Get-ChildItem -Path ${psPath} -Name`
+              const r = await spawnBounded(psExe, powershellEncodedArgs(ps), 10000)
               return r.code === 0 ? ok(r.stdout.trim() || '(empty)') : { content: [{ type: 'text', text: r.stderr }], isError: true }
             }
             default: return { content: [{ type: 'text', text: `Unknown registry mode: ${mode}` }], isError: true }
@@ -2217,15 +2453,17 @@ export function createSession(opts: SessionOptions = {}): Session {
           const title = str('title')
           const message = str('message')
           const appId = typeof args.app_id === 'string' ? args.app_id : 'Windows.SystemToastNotification'
+          const escapedTitle = xmlEscape(title)
+          const escapedMessage = xmlEscape(message)
           const ps = `
 [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
 [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime] | Out-Null
 $xml = [Windows.Data.Xml.Dom.XmlDocument]::new()
-$xml.LoadXml("<toast><visual><binding template='ToastText02'><text id='1'>${title}</text><text id='2'>${message}</text></binding></visual></toast>")
+$xml.LoadXml(${powershellLiteral(`<toast><visual><binding template="ToastText02"><text id="1">${escapedTitle}</text><text id="2">${escapedMessage}</text></binding></visual></toast>`)})
 $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
-[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('${appId}').Show($toast)
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier(${powershellLiteral(appId)}).Show($toast)
 `
-          const r = await spawnBounded('powershell', ['-NoProfile', '-Command', ps], 10000)
+          const r = await spawnBounded(getPowerShellExe(), powershellEncodedArgs(ps), 10000)
           return r.code === 0 ? ok('Notification sent') : { content: [{ type: 'text', text: r.stderr || 'Failed to send notification' }], isError: true }
         }
 

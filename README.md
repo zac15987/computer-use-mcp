@@ -700,6 +700,8 @@ These return structured before/after state so you can verify activation succeede
 | `list_spaces` | List virtual desktops/Spaces grouped by display. | — |
 | `get_active_space` | Currently active Space/desktop ID. | — |
 | `create_agent_space` | Create a new virtual desktop. On Windows: Ctrl+Win+D. | — |
+| `move_window_to_space` | Move a window to a Space/desktop. | `window_id: number`, `space_id: number` |
+| `remove_window_from_space` | Remove a window from a Space/desktop. | `window_id: number`, `space_id: number` |
 | `destroy_space` | Close current virtual desktop. On Windows: Ctrl+Win+F4. | `space_id?: number` |
 
 ### Cross-platform tools (v6)
@@ -721,7 +723,7 @@ These return structured before/after state so you can verify activation succeede
 | `registry` | Windows Registry get/set/delete/list. | `mode`, `path`, `name?`, `value?`, `type?` |
 | `notification` | Send a Windows toast notification. | `title`, `message`, `app_id?` |
 
-> **Note on macOS Spaces:** Space *mutation* tools use keyboard shortcuts on Windows. On macOS, CGS-created Spaces are orphaned on SIP-enabled Macs. See [CHANGELOG](CHANGELOG.md) for details.
+> **Note on macOS Spaces:** macOS does not expose a public API for mutating Spaces. By default, `COMPUTER_USE_SPACES_BACKEND=auto` tries `yabai`, then Mission Control gesture automation, then the private CGS fallback. Set `COMPUTER_USE_SPACES_BACKEND=yabai|mission_control|cgs` to force one path. The `yabai` backend requires installing `yabai`, granting Accessibility permission, and installing/loading yabai's scripting addition for Space create/destroy. The CGS fallback may create orphaned Spaces on SIP-enabled Macs.
 
 ---
 
@@ -913,7 +915,7 @@ This package has **full control of your computer** when permissions are granted.
 ### What we do to keep it safe
 
 - **Input validation at two layers**: Zod schemas at the MCP boundary, plus runtime guards in the session layer. Malformed inputs return errors rather than crashing.
-- **No shell injection**: All system calls use `execFileSync` with argument arrays (never string interpolation). The clipboard tools use `pbcopy`/`pbpaste` directly.
+- **Shell injection resistance**: Shell-backed tools use bounded subprocess calls with argument arrays or encoded PowerShell commands. User-provided PowerShell literals are escaped before script construction, and clipboard tools use `pbcopy`/`pbpaste` directly.
 - **Temp file safety**: Screenshots use `O_EXCL` (exclusive create) to prevent symlink attacks, with a monotonic counter to avoid collisions.
 - **Bounded waits**: The `wait` tool is capped at 300 seconds to prevent indefinite hangs.
 - **No network access**: The native module makes no network calls. The MCP server itself makes no network calls. Only the example scripts (`crypto-numbers.ts`) fetch external data.
@@ -937,6 +939,13 @@ This package has **full control of your computer** when permissions are granted.
 
 ### Architecture
 - The prebuilt `.node` binary is compiled for the architecture of the machine it was built on (arm64 for Apple Silicon, x86_64 for Intel). If you're on a different architecture, build from source.
+
+### Spaces
+- macOS has no public API for creating, moving, or destroying Spaces. The server supports `COMPUTER_USE_SPACES_BACKEND=auto` (default), `yabai`, `mission_control`, and `cgs`.
+- `auto` prefers `yabai` when it is installed and authorized, falls back to Mission Control gesture automation, then falls back to private CGS calls.
+- `yabai` provides the most reliable visible Spaces behavior, but macOS must grant Accessibility permission to `/opt/homebrew/bin/yabai` or the service will not start. Space create/destroy also require yabai's scripting addition; on yabai v7.1.24 this is installed and loaded with `sudo yabai --load-sa`. On SIP-enabled systems, that may require Recovery-mode SIP configuration before loading succeeds.
+- `mission_control` uses visible UI automation and can fail when display layout, animation timing, or Mission Control settings differ.
+- `cgs` is best effort only; on SIP-enabled Macs it can return `attached:false`, which means the created Space is internal/orphaned rather than visible in Mission Control.
 
 ### Screenshots
 - Screenshots default to JPEG (quality 80) for size efficiency. Set `quality: 0` for lossless PNG.

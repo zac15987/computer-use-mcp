@@ -136,6 +136,8 @@ const V5_TOOL_NAMES = [
   'fill_form',
   'get_tool_guide',
   'get_app_capabilities',
+  'move_window_to_space',
+  'remove_window_from_space',
 ]
 
 test('v5 tools are present in listTools', async () => {
