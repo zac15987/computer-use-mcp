@@ -27,10 +27,14 @@ test('isStdioEntrypoint accepts Windows-style server.ts path (tsx dev mode)', ()
 })
 
 test('isStdioEntrypoint accepts POSIX-style bin-name path', () => {
+  assert.equal(isStdioEntrypoint('/usr/local/bin/zpit-desktop-mcp'), true)
+  // Upstream bin name kept for back-compat with the original @zavora-ai
+  // entrypoint shape.
   assert.equal(isStdioEntrypoint('/usr/local/bin/computer-use-mcp'), true)
 })
 
 test('isStdioEntrypoint accepts Windows-style bin-name path', () => {
+  assert.equal(isStdioEntrypoint('C:\\Users\\Jeff\\AppData\\Roaming\\npm\\zpit-desktop-mcp'), true)
   assert.equal(isStdioEntrypoint('C:\\Users\\Jeff\\AppData\\Roaming\\npm\\computer-use-mcp'), true)
 })
 

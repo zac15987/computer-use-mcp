@@ -9,6 +9,7 @@
 
 import { loadNative, type NativeModule } from './native.js'
 import { execFile, execFileSync } from 'child_process'
+import { isAumid, launchAumidViaExplorer } from './aumid.js'
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
 
@@ -1685,12 +1686,30 @@ export function createSession(opts: SessionOptions = {}): Session {
         // ── Apps ─────────────────────────────────────────────────────────────
         case 'open_application': {
           const bid = str('bundle_id')
-          const r = n.activateApp(bid, 3000)
+          let r = n.activateApp(bid, 3000)
+
+          // Windows packaged-app (UWP / Store / AUMID) fallback. The native
+          // activateApp uses EnumWindows, so it can only raise a window that
+          // already exists — for a not-yet-running Store app like
+          // `Microsoft.WindowsAlarms_8wekyb3d8bbwe!App` it returns activated:false
+          // and the agent has no way forward. Dispatch through
+          // `explorer.exe shell:AppsFolder\<AUMID>` (the same activation path
+          // the Start menu uses) and re-try activateApp once the window has
+          // had time to appear.
+          let aumidLaunched = false
+          if (IS_WINDOWS && !r.activated && isAumid(bid)) {
+            aumidLaunched = true
+            await launchAumidViaExplorer(bid)
+            await sleep(1500)
+            r = n.activateApp(bid, 3000)
+          }
+
           if (r.activated) {
             updateTargetState({ bundleId: bid }, 'activation')
           }
           await sleep(300)
-          return ok(`Opened ${bid} (activated: ${r.activated})`)
+          const suffix = aumidLaunched ? `, aumid_launched: true` : ''
+          return ok(`Opened ${bid} (activated: ${r.activated}${suffix})`)
         }
 
         // ── Observation tools (never mutate TargetState) ─────────────────

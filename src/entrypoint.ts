@@ -2,8 +2,8 @@
  * Standalone stdio entrypoint detection.
  *
  * Determines whether the current Node process was invoked as the
- * computer-use-mcp stdio server (e.g. `node dist/server.js` or
- * `npx @zavora-ai/computer-use-mcp`) vs imported as a library.
+ * zpit-desktop-mcp stdio server (e.g. `node dist/server.js` or
+ * `npx zpit-desktop-mcp`) vs imported as a library.
  *
  * Path-separator-agnostic: Node normalizes `process.argv[1]` to the platform
  * separator, so a hard-coded `/` check rejects valid Windows invocations like
@@ -22,6 +22,10 @@ export function isStdioEntrypoint(argv1: string | undefined): boolean {
   return (
     normalized.endsWith('/server.ts') ||
     normalized.endsWith('/server.js') ||
+    normalized.endsWith('/zpit-desktop-mcp') ||
+    // Upstream bin name — preserved so existing test fixtures still pass and
+    // anyone running the original @zavora-ai package against our entrypoint
+    // helper still gets the right answer.
     normalized.endsWith('/computer-use-mcp')
   )
 }

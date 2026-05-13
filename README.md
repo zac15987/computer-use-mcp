@@ -1,4 +1,20 @@
-# computer-use-mcp
+# zpit-desktop-mcp
+
+> Fork of [@zavora-ai/computer-use-mcp](https://github.com/zavora-ai/computer-use-mcp), maintained as the desktop-control MCP server backing [zpit](https://github.com/zac15987/zpit)'s desktop agent.
+
+**This is a fork.** Use the upstream package for general MCP desktop control. Use this fork only if you are running zpit's desktop agent, or if you need the zpit-specific fixes (Windows AUMID launch, stdio entrypoint detection for Windows backslash paths) before they land upstream.
+
+### What this fork changes vs. upstream `@zavora-ai/computer-use-mcp@6.1.0`
+
+- **Windows AUMID launch** — `open_application` now resolves UWP / Microsoft Store apps by AUMID (e.g. `Microsoft.WindowsAlarms_8wekyb3d8bbwe!App`) via `explorer.exe shell:AppsFolder\<AUMID>`, then re-tries `activateApp` to bring the window to front. Upstream only does `activateApp`, which can't launch a not-yet-running Store app.
+- **Stdio entrypoint detection (Windows)** — accepts backslash paths in `process.argv[1]`. Without this, the server silently exits on every Windows MCP host launch (`node dist/server.js`, `npx ...`). Posted upstream as PR [#9](https://github.com/zavora-ai/computer-use-mcp/pull/9).
+- **Renamed** — npm package `zpit-desktop-mcp`, bin `zpit-desktop-mcp`. Internal API and tool surface are unchanged from the upstream.
+
+License is unchanged (MIT). The upstream copyright and contributor attribution are preserved in the LICENSE file and the `contributors` field of `package.json`.
+
+---
+
+## Original upstream description
 
 > Computer Use MCP is an open source high performance MCP server + client for controlling your desktop computer with AI Agents. Tools include screenshot, mouse, keyboard, clipboard, app management, and window-level targeting — all in-process via Rust NAPI. Easy to install via npm and works with Claude Code, Claude DEsktop, Codex CLi, Codex Desktop, Gemnini Cli, Kiro CLi, Kiro VS Code Extension, Github Copilot, Cursor, OpenCode, OpenClaw, Hermes Agent and any other provider that supports Model Context Protocol.
 
