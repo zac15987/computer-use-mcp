@@ -1709,7 +1709,28 @@ export function createSession(opts: SessionOptions = {}): Session {
           }
           await sleep(300)
           const suffix = aumidLaunched ? `, aumid_launched: true` : ''
-          return ok(`Opened ${bid} (activated: ${r.activated}${suffix})`)
+          const base = `Opened ${bid} (activated: ${r.activated}${suffix})`
+
+          // Self-correcting hint: on Windows, if activateApp returned false AND
+          // the bundle_id doesn't look like an AUMID (no "!"), the agent probably
+          // passed a friendly name ("Clock") or partial PackageFamilyName.
+          // Surface what the right format looks like so it can retry without
+          // having to guess. Deliberately do not interpolate `bid` into the
+          // suggested PowerShell command — `bid` is agent-controlled and we
+          // don't want to hand back a shell command that could be re-executed
+          // verbatim with attacker-controlled substrings.
+          if (IS_WINDOWS && !r.activated && !isAumid(bid)) {
+            return ok(
+              `${base}. ` +
+              `Hint: on Windows, UWP / Microsoft Store / packaged apps need the ` +
+              `full AUMID in the form <PackageFamilyName>!<ApplicationId> ` +
+              `(e.g. "Microsoft.WindowsAlarms_8wekyb3d8bbwe!App"). Friendly names ` +
+              `("Clock", "Calculator") and partial PFNs without "!" do not work. ` +
+              `Find AUMIDs via Bash: powershell -NoProfile -Command "Get-StartApps"`,
+            )
+          }
+
+          return ok(base)
         }
 
         // ── Observation tools (never mutate TargetState) ─────────────────

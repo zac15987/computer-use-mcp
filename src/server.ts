@@ -160,8 +160,19 @@ export function createComputerUseServer(opts: ServerOptions = {}): McpServer {
   tool('read_clipboard', 'Read clipboard contents', {}, NONE_READ)
   tool('write_clipboard', 'Write text to clipboard', { text: z.string() }, NONE_MUT)
   // App / window lifecycle — NSWorkspace/AX mutations.
-  tool('open_application', 'Open and focus an app by bundle ID', {
-    bundle_id: z.string().describe('macOS bundle ID e.g. "com.apple.Safari"'),
+  tool('open_application', 'Open and focus an app by bundle ID (macOS) or AUMID / executable name (Windows)', {
+    bundle_id: z.string().describe(
+      'Platform-specific app identifier. ' +
+      'macOS: bundle ID, e.g. "com.apple.Safari". ' +
+      'Windows Win32 / classic apps: executable name or path, e.g. "notepad.exe". ' +
+      'Windows UWP / Microsoft Store / packaged apps: full AUMID in the form ' +
+      '"<PackageFamilyName>!<ApplicationId>", e.g. ' +
+      '"Microsoft.WindowsAlarms_8wekyb3d8bbwe!App". ' +
+      'Friendly names like "Clock" or "Calculator" will NOT work for UWP apps — ' +
+      'the full AUMID (containing "!") is required. ' +
+      'To find a UWP app\'s AUMID, run via Bash: ' +
+      'powershell -NoProfile -Command "Get-StartApps"',
+    ),
   }, AX_MUT)
   tool('get_frontmost_app', 'Get the currently frontmost app', {}, AX_READ)
   tool('list_windows', 'List visible on-screen windows, optionally filtered by bundle ID', {
