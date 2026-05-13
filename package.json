@@ -62,8 +62,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build:native": "cd native && cargo build --release && cp target/release/libcomputer_use_napi.dylib ../computer-use-napi.darwin-$(uname -m | sed 's/x86_64/x64/' | sed 's/aarch64/arm64/').node && cp target/release/libcomputer_use_napi.dylib ../computer-use-napi.node",
-    "build:native:win": "cd native && cargo build --release && copy target\\release\\computer_use_napi.dll ..\\computer-use-napi.win32-x64.node",
+    "build:native": "node scripts/build-native.mjs",
     "build:ts": "tsc",
     "build": "npm run build:native && npm run build:ts",
     "test": "npm run build:ts && node --test test/*.test.mjs",
