@@ -117,6 +117,18 @@ export interface NativeModule {
   holdKey(keys: string[], durationMs: number): void // throws on unknown key
   // Apps
   activateApp(bundleId: string, timeoutMs?: number): { bundleId: string; activated: boolean; displayName?: string }
+  /**
+   * Windows-only: spawn a Win32 executable via ShellExecuteExW and return
+   * its PID. Used by `open_application` when activateApp finds no existing
+   * window for a `.exe` path. UAC manifests are honored (the prompt
+   * appears on the secure desktop and cannot be interacted with from the
+   * agent). Undefined on macOS.
+   */
+  launchExe?(path: string): {
+    launched: boolean
+    pid: number | null
+    reason?: string
+  }
   getFrontmostApp(): { bundleId: string; displayName: string; pid: number } | null
   getWindow(windowId: number): WindowRecord | null
   getCursorWindow(): WindowRecord | null

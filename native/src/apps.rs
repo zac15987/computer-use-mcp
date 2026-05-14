@@ -200,7 +200,9 @@ mod win {
     use windows::Win32::Foundation::*;
     use windows::Win32::System::Diagnostics::ToolHelp::*;
     use windows::Win32::System::Threading::*;
+    use windows::Win32::UI::Shell::*;
     use windows::Win32::UI::WindowsAndMessaging::*;
+    use windows::core::PCWSTR;
     use std::collections::HashMap;
 
     /// drainRunloop is a no-op on Windows (no CFRunLoop).
@@ -241,6 +243,75 @@ mod win {
                 "displayName": title,
                 "pid": pid,
             }))
+        }
+    }
+
+    /// Launch a Win32 executable by path or filename via ShellExecuteExW.
+    ///
+    /// Unlike `activate_app`, which only raises an existing window, this
+    /// actually spawns the process. Used by the `open_application` handler
+    /// when the bid looks like a `.exe` (path or filename) and no matching
+    /// window is currently open.
+    ///
+    /// Returns `{ launched, pid, reason? }`:
+    /// - `launched: true, pid: <u32>` — process started, PID captured.
+    /// - `launched: true, pid: null, reason: "no_process_handle"` —
+    ///   ShellExecute returned success but with no process handle (DDE
+    ///   activation, file-association routed to an already-running app).
+    /// - `launched: false, reason: <str>` — ShellExecute reported failure
+    ///   (file missing, AV block, no association, etc.).
+    ///
+    /// UAC manifests embedded in the .exe are honored — `requireAdministrator`
+    /// triggers the secure-desktop prompt as normal. The proxy / agent has
+    /// no way to interact with that prompt; this function only initiates
+    /// the launch.
+    #[napi]
+    pub fn launch_exe(path: String) -> napi::Result<serde_json::Value> {
+        if path.is_empty() {
+            return Ok(serde_json::json!({
+                "launched": false,
+                "reason": "empty_path",
+            }));
+        }
+        let path_w: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        let verb_w: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
+
+        unsafe {
+            let mut info: SHELLEXECUTEINFOW = std::mem::zeroed();
+            info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+            info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+            info.lpVerb = PCWSTR(verb_w.as_ptr());
+            info.lpFile = PCWSTR(path_w.as_ptr());
+            info.nShow = SW_SHOWNORMAL.0;
+
+            match ShellExecuteExW(&mut info) {
+                Ok(()) => {
+                    if info.hProcess.is_invalid() {
+                        return Ok(serde_json::json!({
+                            "launched": true,
+                            "pid": null,
+                            "reason": "no_process_handle",
+                        }));
+                    }
+                    let pid = GetProcessId(info.hProcess);
+                    let _ = CloseHandle(info.hProcess);
+                    if pid == 0 {
+                        return Ok(serde_json::json!({
+                            "launched": true,
+                            "pid": null,
+                            "reason": "pid_unavailable",
+                        }));
+                    }
+                    Ok(serde_json::json!({
+                        "launched": true,
+                        "pid": pid,
+                    }))
+                }
+                Err(e) => Ok(serde_json::json!({
+                    "launched": false,
+                    "reason": format!("shell_execute_failed: {}", e),
+                })),
+            }
         }
     }
 

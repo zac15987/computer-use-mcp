@@ -1735,27 +1735,49 @@ export function createSession(opts: SessionOptions = {}): Session {
           const bid = str('bundle_id')
           let r = n.activateApp(bid, 3000)
 
-          // Windows packaged-app (UWP / Store / AUMID) fallback. The native
-          // activateApp uses EnumWindows, so it can only raise a window that
-          // already exists — for a not-yet-running Store app like
-          // `Microsoft.WindowsAlarms_8wekyb3d8bbwe!App` it returns activated:false
-          // and the agent has no way forward. Dispatch through
-          // `explorer.exe shell:AppsFolder\<AUMID>` (the same activation path
-          // the Start menu uses) and re-try activateApp once the window has
-          // had time to appear.
+          // Windows: when activateApp finds no existing window, we actually
+          // have to launch the app. Two branches:
+          //
+          // 1. AUMID (Store / UWP / packaged) — dispatched through
+          //    `explorer.exe shell:AppsFolder\<AUMID>`, the same activation
+          //    path the Start menu uses.
+          // 2. Win32 `.exe` path or filename — `activateApp` on Windows is
+          //    EnumWindows-based and does NOT spawn the process; it only
+          //    raises an existing window. So when the agent passes a path
+          //    like `C:\...\setup.exe` and that program isn't running, we
+          //    must call `launchExe` (ShellExecuteExW) explicitly. Before
+          //    this branch existed, `open_application` silently returned
+          //    `activated: false` with a misleading "UAC pending" hint and
+          //    the program never started at all.
           let aumidLaunched = false
-          if (IS_WINDOWS && !r.activated && isAumid(bid)) {
-            aumidLaunched = true
-            await launchAumidViaExplorer(bid)
-            await sleep(1500)
-            r = n.activateApp(bid, 3000)
+          let exeLaunchPid: number | null = null
+          let exeLaunchFailure: string | undefined
+          if (IS_WINDOWS && !r.activated) {
+            if (isAumid(bid)) {
+              aumidLaunched = true
+              await launchAumidViaExplorer(bid)
+              await sleep(1500)
+              r = n.activateApp(bid, 3000)
+            } else if (looksLikeWin32App(bid) && typeof n.launchExe === 'function') {
+              const launchResult = n.launchExe(bid)
+              if (launchResult.launched) {
+                exeLaunchPid = launchResult.pid
+              } else {
+                exeLaunchFailure = launchResult.reason ?? 'unknown'
+              }
+              await sleep(1500)
+              r = n.activateApp(bid, 3000)
+            }
           }
 
           if (r.activated) {
             updateTargetState({ bundleId: bid }, 'activation')
           }
           await sleep(300)
-          const suffix = aumidLaunched ? `, aumid_launched: true` : ''
+          const suffixParts: string[] = []
+          if (aumidLaunched) suffixParts.push('aumid_launched: true')
+          if (exeLaunchPid != null) suffixParts.push(`pid: ${exeLaunchPid}`)
+          const suffix = suffixParts.length ? `, ${suffixParts.join(', ')}` : ''
           const base = `Opened ${bid} (activated: ${r.activated}${suffix})`
 
           // Self-correcting hints on `activated: false`. Split by what the
@@ -1769,22 +1791,49 @@ export function createSession(opts: SessionOptions = {}): Session {
           // status string, not a runnable command.
           if (IS_WINDOWS && !r.activated) {
             if (looksLikeWin32App(bid)) {
-              // .exe path or .exe filename. `activateApp` is EnumWindows-based,
-              // so it returns false until the spawned process actually creates
-              // a top-level window. The agent should NOT call `open_application`
-              // again (that spawns duplicate processes); it should observe.
+              if (exeLaunchPid != null) {
+                // We launched it ourselves and got a PID, but no top-level
+                // window appeared in the time we waited. For self-extracting
+                // installers and large `.exe` files the UI is commonly
+                // hosted in a *child* process that hasn't been spawned yet;
+                // checking only the parent PID will miss it.
+                return ok(
+                  `${base}. ` +
+                  `Hint: launched (PID ${exeLaunchPid}) but no top-level window yet. ` +
+                  `For self-extracting installers / large .exe files (>100MB), ` +
+                  `the UI is commonly hosted in a child process; the parent ` +
+                  `is a bootstrapper that may exit or stay headless. To diagnose: ` +
+                  `(1) Bash: powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \\"ParentProcessId=${exeLaunchPid}\\" | Select-Object ProcessId,Name" ` +
+                  `to enumerate child processes spawned by this PID; ` +
+                  `(2) list_windows (no bundle_id filter) and match by window title; ` +
+                  `(3) for >100MB installers, wait 15-30s before re-checking. ` +
+                  `Do NOT call open_application again. ` +
+                  `Only blame UAC if your startup UAC probe showed prompts are enabled ` +
+                  `AND the PID has exited (Get-Process -Id ${exeLaunchPid} returns nothing).`,
+                )
+              }
+              if (exeLaunchFailure != null) {
+                // ShellExecute itself failed — most likely file not found,
+                // AV block, or no file association.
+                return ok(
+                  `${base}. ` +
+                  `Hint: launch failed (${exeLaunchFailure}). Verify the path ` +
+                  `with Bash 'ls' / 'Get-Item' and check whether Defender or ` +
+                  `another AV has quarantined the file. Do NOT call ` +
+                  `open_application again.`,
+                )
+              }
+              // Older native module without launchExe — preserve the
+              // pre-fork behavior so the proxy degrades gracefully.
               return ok(
                 `${base}. ` +
-                `Hint: on Windows, activated=false for a .exe usually means ` +
-                `the process was dispatched but no top-level window is visible ` +
-                `yet. Common causes: (a) UAC elevation prompt is pending on the ` +
-                `secure desktop — the agent cannot see or click it; ask the ` +
-                `user to confirm; (b) the program is still initializing or ` +
-                `unpacking; (c) a prior UAC denial left no process running. ` +
-                `Do NOT call open_application again — that spawns duplicate ` +
-                `processes. Instead: wait 3-5s, then call list_windows (no ` +
-                `bundle_id filter on Windows) and check tasklist for the ` +
-                `executable name to see whether a process actually exists.`,
+                `Hint: activated=false for a .exe and no PID was returned ` +
+                `(native module may be out of date). Possible causes: ` +
+                `(a) UAC elevation prompt pending on the secure desktop ` +
+                `(only if your startup UAC probe showed prompts are enabled); ` +
+                `(b) the program is still initializing; (c) a prior denial ` +
+                `left no process running. Do NOT call open_application again. ` +
+                `Wait 3-5s, then list_windows and tasklist to investigate.`,
               )
             }
             if (!isAumid(bid)) {
