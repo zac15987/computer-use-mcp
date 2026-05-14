@@ -80,13 +80,18 @@ test('activate_window schema includes window_id and timeout_ms parameters', asyn
   })
 })
 
-// ── Server version is 6.1.0 ─────────────────────────────────────────────────
+// ── Server version comes from package.json (not hardcoded) ──────────────────
 
-test('server reports version 6.1.0', async () => {
+test('server reports version from package.json', async () => {
+  const { readFileSync } = await import('node:fs')
+  const { fileURLToPath } = await import('node:url')
+  const { dirname, join } = await import('node:path')
+  const here = dirname(fileURLToPath(import.meta.url))
+  const pkg = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf8'))
   await withClient(async (client) => {
     const info = client.getServerVersion()
     assert.ok(info, 'server version info should be available after connect')
-    assert.equal(info.version, '6.1.0', 'server version should be 6.1.0')
+    assert.equal(info.version, pkg.version, `server version should match package.json version (${pkg.version})`)
     assert.equal(info.name, 'computer-use', 'server name should be computer-use')
   })
 })

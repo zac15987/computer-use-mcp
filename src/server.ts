@@ -6,9 +6,36 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import { readFileSync } from 'fs'
+import { fileURLToPath } from 'url'
+import { dirname, join } from 'path'
 import { z, ZodTypeAny } from 'zod'
 import { createSession, type Session, type SessionOptions } from './session.js'
 import { isStdioEntrypoint } from './entrypoint.js'
+
+/**
+ * Resolve the package version from package.json at runtime. Looked up once
+ * at module load. Works for both the published layout (dist/server.js with
+ * package.json one level up) and the dev layout (src/server.ts run via
+ * tsx, same one-level-up relationship). Falls back to "unknown" if the
+ * file can't be read — MCP clients see a string either way.
+ *
+ * Reads `package.json` instead of hardcoding so a `version` bump in
+ * package.json (the source of truth for npm publish) automatically
+ * propagates into the MCP initialize handshake.
+ */
+function resolvePackageVersion(): string {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url))
+    const pkgPath = join(here, '..', 'package.json')
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'))
+    return typeof pkg.version === 'string' ? pkg.version : 'unknown'
+  } catch {
+    return 'unknown'
+  }
+}
+
+const SERVER_VERSION = resolvePackageVersion()
 
 /**
  * v5.2 — How each tool reaches the target app.
@@ -51,7 +78,7 @@ export interface ServerOptions extends SessionOptions {
 }
 
 export function createComputerUseServer(opts: ServerOptions = {}): McpServer {
-  const server = new McpServer({ name: 'computer-use', version: '6.1.0' })
+  const server = new McpServer({ name: 'computer-use', version: SERVER_VERSION })
   const session = opts.session ?? createSession({
     vision: opts.vision ?? (process.env.COMPUTER_USE_VISION !== 'false'),
     provider: opts.provider ?? process.env.COMPUTER_USE_PROVIDER,
