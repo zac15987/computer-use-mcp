@@ -1,6 +1,6 @@
 {
   "name": "zpit-desktop-mcp",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Desktop-control MCP server for zpit (https://github.com/zac15987/zpit). Fork of @zavora-ai/computer-use-mcp with Windows AUMID launch support and zpit-specific fixes. Cross-platform (macOS + Windows), backed by Rust NAPI.",
   "author": "Chih Hao Yeh <zac15987@gmail.com>",
   "contributors": [

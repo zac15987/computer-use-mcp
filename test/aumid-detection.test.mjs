@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { isAumid, aumidShellTarget } from '../dist/aumid.js'
+import { isAumid, aumidShellTarget, looksLikeWin32App } from '../dist/aumid.js'
 
 // Regression: upstream `open_application` only calls `activateApp`, which on
 // Windows is `EnumWindows`-based and can't launch a not-yet-running UWP /
@@ -65,4 +65,48 @@ test('aumidShellTarget does not re-encode the AUMID body', () => {
     aumidShellTarget('Some.Package_hash!multi.dot.id'),
     'shell:AppsFolder\\Some.Package_hash!multi.dot.id',
   )
+})
+
+// Regression: the `activated: false` hint used to fire the UWP/AUMID message
+// for any non-AUMID bid, including .exe paths. That pushed agents toward
+// looking up an AUMID for an installer that was simply waiting on UAC.
+// `looksLikeWin32App` separates "path or .exe" (Win32 hint) from "bare
+// friendly name" (UWP hint).
+
+test('looksLikeWin32App detects Windows paths', () => {
+  assert.equal(looksLikeWin32App('C:\\Windows\\System32\\notepad.exe'), true)
+  assert.equal(looksLikeWin32App('D:\\Program Files\\App\\app.exe'), true)
+  assert.equal(looksLikeWin32App('C:\\Users\\Peanut\\Downloads\\KVS_Setup\\KVS_Setup_G_1240_combine.exe'), true)
+})
+
+test('looksLikeWin32App detects bare .exe filenames', () => {
+  assert.equal(looksLikeWin32App('notepad.exe'), true)
+  assert.equal(looksLikeWin32App('chrome.exe'), true)
+  assert.equal(looksLikeWin32App('SETUP.EXE'), true)  // case-insensitive
+})
+
+test('looksLikeWin32App detects POSIX-style paths', () => {
+  // Some environments may translate paths; still treat as Win32-ish.
+  assert.equal(looksLikeWin32App('/c/Users/test/app.exe'), true)
+  assert.equal(looksLikeWin32App('./setup.exe'), true)
+})
+
+test('looksLikeWin32App rejects friendly names and partial PFNs', () => {
+  // These should still hit the UWP/AUMID hint, not the Win32 hint.
+  assert.equal(looksLikeWin32App('Clock'), false)
+  assert.equal(looksLikeWin32App('Calculator'), false)
+  assert.equal(looksLikeWin32App('Microsoft.WindowsAlarms'), false)
+  assert.equal(looksLikeWin32App('notepad'), false)  // no extension; treat as bare name
+})
+
+test('looksLikeWin32App rejects AUMIDs and macOS bundle IDs', () => {
+  assert.equal(looksLikeWin32App('Microsoft.WindowsAlarms_8wekyb3d8bbwe!App'), false)
+  assert.equal(looksLikeWin32App('com.apple.Safari'), false)
+})
+
+test('looksLikeWin32App handles edge cases gracefully', () => {
+  assert.equal(looksLikeWin32App(''), false)
+  assert.equal(looksLikeWin32App(undefined), false)
+  assert.equal(looksLikeWin32App(null), false)
+  assert.equal(looksLikeWin32App(123), false)
 })

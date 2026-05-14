@@ -33,6 +33,34 @@ export function isAumid(s: string): boolean {
 }
 
 /**
+ * Detect whether a bundle_id looks like a Win32 executable path or filename.
+ *
+ * Used by `open_application` to decide which hint to show on
+ * `activated: false`. When the agent passes a `.exe` path (e.g. an installer
+ * the user just downloaded), the AUMID hint is actively misleading — the
+ * real reason `activated` is false is usually that the process was just
+ * dispatched and no window is visible yet (UAC pending on secure desktop,
+ * still unpacking, or a prior UAC denial). Showing the AUMID hint pushes
+ * the agent into "look up the friendly name → retry with AUMID" reasoning
+ * when it should be looking at `list_windows` / `tasklist` instead.
+ *
+ * Heuristic:
+ *   - contains `\` or `/`  → looks like a path
+ *   - ends with `.exe` (case-insensitive) → looks like a Win32 executable
+ *
+ * Friendly names (`Clock`), partial PFNs (`Microsoft.WindowsAlarms`), and
+ * macOS bundle IDs (`com.apple.Safari`) all return false — for those the
+ * AUMID hint is still the right answer.
+ */
+export function looksLikeWin32App(s: string): boolean {
+  if (typeof s !== 'string') return false
+  if (s.length === 0) return false
+  if (s.includes('\\') || s.includes('/')) return true
+  if (s.toLowerCase().endsWith('.exe')) return true
+  return false
+}
+
+/**
  * Build the `shell:` URI that `explorer.exe` accepts as an AUMID activation.
  * Example output: `shell:AppsFolder\Microsoft.WindowsAlarms_8wekyb3d8bbwe!App`.
  */
