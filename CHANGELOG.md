@@ -1,5 +1,32 @@
 # Changelog
 
+## zpit-desktop-mcp v1.1.0 (2026-05-14)
+
+Windows feature parity for the strategy advisor + cross-platform test infrastructure.
+
+### Tool guide priority — four new Windows entries
+
+`get_tool_guide` now returns concrete Windows automation recipes that previously fell through to generic accessibility advice:
+
+- **Spreadsheet** → Excel COM via PowerShell (`New-Object -ComObject Excel.Application`)
+- **Calendar / event / appointment / note / task** → Classic Outlook COM (`Outlook.Application` ProgID), with an explicit fallback note for the New Outlook UWP rollout (no COM available there)
+- **Music / play / pause / volume** → PowerShell + `user32.dll` P/Invoke of `keybd_event` with media virtual-key codes (0xB3 play/pause, 0xB0 next, 0xB1 prev, 0xAD/0xAE/0xAF volume). Works across Spotify / Windows Media Player / YouTube Music / any Media Session-aware browser tab.
+- **Chat / SMS / Teams / Discord / WhatsApp / Slack** → Accessibility (`get_ui_tree` + `set_value` + `click_element`); these apps have no stable automation APIs on Windows.
+
+### Notification reliability fix
+
+`notification` now uses Windows PowerShell 5.1 (`powershell.exe`) instead of `pwsh`. PowerShell 7+ dropped support for the `[Type, Assembly, ContentType = WindowsRuntime]` syntax used to load `Windows.UI.Notifications`, which silently broke toast notifications on machines where `pwsh` is the default. WinRT-related failures now surface a clear hint pointing at the PowerShell version mismatch.
+
+### Test infrastructure
+
+- 9 macOS-only tests (sdef, yabai, AppleScript `run_script`) now `skip` on Windows with explicit reason strings instead of failing.
+- Property 11 (tool guide priority) is now cross-platform thanks to the new Windows entries.
+- New Windows-specific tests for `get_app_capabilities` shape, `run_script` powershell path, `create_agent_space` Ctrl+Win+D flow, and `get_app_dictionary` `platform_unsupported`.
+- `locked_by_pid` test no longer needs `bash` / `nohup` — uses cross-platform `child_process.spawn(process.execPath, ...)` with `detached: true`.
+- `pump fires drainRunloop` split into per-platform variants — Windows correctly asserts the pump never fires (no CFRunLoop), macOS keeps the original ≥5 assertion.
+
+Test totals on Windows: **97 pass / 0 fail / 9 macOS-only skip** (was 86 pass / 11 fail / 0 skip on v1.0.2).
+
 ## v6.0.0 (2026-04-26)
 
 v6.0 adds **native Windows support**, transforming computer-use-mcp from a macOS-only tool into a cross-platform desktop automation server. Every Windows API call goes through Rust via `windows-rs` with zero-overhead NAPI bindings — no Python, no pywin32, no subprocess overhead.

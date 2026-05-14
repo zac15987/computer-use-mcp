@@ -560,7 +560,9 @@ test('Feature: v5-accessible-ui-automation, Property 11: tool guide priority', a
 
 // ── Property 12: get_app_capabilities accuracy ──────────────────────────────
 
-test('Feature: v5-accessible-ui-automation, Property 12: get_app_capabilities accuracy', async () => {
+test('Feature: v5-accessible-ui-automation, Property 12: get_app_capabilities accuracy', {
+  skip: process.platform === 'win32' && 'macOS-only: tests sdef-based scriptability detection. The Windows code path returns a different shape (scriptable: false, powershell: true) — covered by the Windows-specific test below.',
+}, async () => {
   const native = createMockNative()
   // sdef says "com.apple.mail" is scriptable
   const scriptableSdef = `<?xml version="1.0" encoding="UTF-8"?>
@@ -595,9 +597,41 @@ test('Feature: v5-accessible-ui-automation, Property 12: get_app_capabilities ac
   assert.equal(body2.topLevelCount, 0)
 })
 
+// ── Property 12 Windows: get_app_capabilities returns the Windows shape ─────
+
+test('Property 12 (Windows): get_app_capabilities returns Windows shape', {
+  skip: process.platform !== 'win32' && 'Windows-specific shape: scriptable=false, powershell=true, accessible based on windows.',
+}, async () => {
+  const native = createMockNative()
+  // On Windows the handler never calls sdef/mdfind, so spawnBounded can be a no-op.
+  const session = createSession({ native, spawnBounded: mockSpawnBounded(new Map()) })
+
+  // Running app with windows (mail has windowId 1003)
+  const r1 = await session.dispatch('get_app_capabilities', { bundle_id: 'com.apple.mail' })
+  const body1 = JSON.parse(r1.content[0].text)
+  assert.equal(body1.scriptable, false, 'Windows has no AppleScript — scriptable must be false')
+  assert.deepEqual(body1.suites, [])
+  assert.equal(body1.powershell, true, 'Windows always exposes powershell via run_script')
+  assert.equal(body1.accessible, true)
+  assert.equal(body1.running, true)
+  assert.equal(body1.hidden, false)
+
+  // Unknown app — not running, no windows
+  const r2 = await session.dispatch('get_app_capabilities', { bundle_id: 'com.unknown.nothing' })
+  const body2 = JSON.parse(r2.content[0].text)
+  assert.equal(body2.scriptable, false)
+  assert.deepEqual(body2.suites, [])
+  assert.equal(body2.powershell, true)
+  assert.equal(body2.running, false)
+  assert.equal(body2.accessible, false)
+  assert.equal(body2.topLevelCount, 0)
+})
+
 // ── Property 13: run_script timeout enforcement ──────────────────────────────
 
-test('Feature: v5-accessible-ui-automation, Property 13: run_script timeout', async () => {
+test('Feature: v5-accessible-ui-automation, Property 13: run_script timeout', {
+  skip: process.platform === 'win32' && 'macOS-only: uses language: "applescript". The Windows handler short-circuits applescript/javascript with a "not supported" error. Windows powershell equivalent is below.',
+}, async () => {
   const native = createMockNative()
   const spawnBounded = async (_cmd, _args, timeoutMs) => {
     return { stdout: '', stderr: '', code: -1, timedOut: true }
@@ -623,7 +657,9 @@ test('Feature: v5-accessible-ui-automation, Property 13: run_script timeout', as
   assert.match(r0.content[0].text, /timed out after 30000ms/)
 })
 
-test('run_script success returns stdout trimmed', async () => {
+test('run_script success returns stdout trimmed', {
+  skip: process.platform === 'win32' && 'macOS-only: uses applescript. Windows powershell equivalent below.',
+}, async () => {
   const native = createMockNative()
   const spawnBounded = async () => ({ stdout: 'hello world\n\n', stderr: '', code: 0, timedOut: false })
   const session = createSession({ native, spawnBounded })
@@ -635,7 +671,9 @@ test('run_script success returns stdout trimmed', async () => {
   assert.equal(r.content[0].text, 'hello world')
 })
 
-test('run_script non-zero exit surfaces stderr with isError', async () => {
+test('run_script non-zero exit surfaces stderr with isError', {
+  skip: process.platform === 'win32' && 'macOS-only: uses applescript. Windows powershell equivalent below.',
+}, async () => {
   const native = createMockNative()
   const spawnBounded = async () => ({ stdout: '', stderr: "syntax error\n", code: 1, timedOut: false })
   const session = createSession({ native, spawnBounded })
@@ -647,9 +685,79 @@ test('run_script non-zero exit surfaces stderr with isError', async () => {
   assert.equal(r.content[0].text, 'syntax error')
 })
 
+// ── Property 13 + run_script (Windows): same semantics via PowerShell ───────
+
+test('Property 13 (Windows): run_script timeout via powershell', {
+  skip: process.platform !== 'win32' && 'Windows-specific: powershell is the only language accepted on Windows.',
+}, async () => {
+  const native = createMockNative()
+  const spawnBounded = async () => ({ stdout: '', stderr: '', code: -1, timedOut: true })
+  const session = createSession({ native, spawnBounded })
+
+  for (const ts of [100, 5000, 200_000, 50, -5]) {
+    const r = await session.dispatch('run_script', {
+      language: 'powershell',
+      script: 'Start-Sleep -Seconds 1',
+      timeout_ms: ts,
+    })
+    assert.ok(r.isError, `timeout=${ts} should error`)
+    assert.match(r.content[0].text, /timed out/i)
+  }
+
+  const r0 = await session.dispatch('run_script', {
+    language: 'powershell',
+    script: 'Start-Sleep -Seconds 1',
+  })
+  assert.ok(r0.isError)
+  assert.match(r0.content[0].text, /timed out after 30000ms/)
+})
+
+test('run_script success returns stdout trimmed (Windows powershell)', {
+  skip: process.platform !== 'win32' && 'Windows-specific: powershell variant of the macOS applescript test.',
+}, async () => {
+  const native = createMockNative()
+  const spawnBounded = async () => ({ stdout: 'hello world\n\n', stderr: '', code: 0, timedOut: false })
+  const session = createSession({ native, spawnBounded })
+  const r = await session.dispatch('run_script', {
+    language: 'powershell',
+    script: 'Write-Output "hello world"',
+  })
+  assert.ok(!r.isError)
+  assert.equal(r.content[0].text, 'hello world')
+})
+
+test('run_script non-zero exit surfaces stderr with isError (Windows powershell)', {
+  skip: process.platform !== 'win32' && 'Windows-specific: powershell variant of the macOS applescript test.',
+}, async () => {
+  const native = createMockNative()
+  const spawnBounded = async () => ({ stdout: '', stderr: 'syntax error\n', code: 1, timedOut: false })
+  const session = createSession({ native, spawnBounded })
+  const r = await session.dispatch('run_script', {
+    language: 'powershell',
+    script: 'bogus-cmdlet',
+  })
+  assert.ok(r.isError)
+  assert.equal(r.content[0].text, 'syntax error')
+})
+
+test('run_script rejects applescript on Windows', {
+  skip: process.platform !== 'win32' && 'Windows-specific: documents that applescript/javascript are explicitly rejected on Windows so agents fail loud rather than silently.',
+}, async () => {
+  const native = createMockNative()
+  const session = createSession({ native, spawnBounded: mockSpawnBounded(new Map()) })
+  const r = await session.dispatch('run_script', {
+    language: 'applescript',
+    script: 'return "x"',
+  })
+  assert.ok(r.isError)
+  assert.match(r.content[0].text, /applescript is not supported on Windows/i)
+})
+
 // ── Property 14: Spaces graceful degradation ─────────────────────────────────
 
-test('Feature: v5-accessible-ui-automation, Property 14: spaces unsupported degrades gracefully', async () => {
+test('Feature: v5-accessible-ui-automation, Property 14: spaces unsupported degrades gracefully', {
+  skip: process.platform === 'win32' && 'macOS-only: tests the macOS spaces code path (yabai / CGS internal COM). Windows uses a completely different Ctrl+Win+D flow — covered by the Windows-specific test below.',
+}, async () => {
   const native = createMockNative()
   native._setCreateAgentSpaceResult(() => ({ supported: false, reason: 'api_unavailable' }))
   native._setMoveWindowToSpaceResult(() => ({ moved: false, reason: 'api_unavailable' }))
@@ -667,7 +775,9 @@ test('Feature: v5-accessible-ui-automation, Property 14: spaces unsupported degr
   assert.ok(['api_unavailable', 'mock'].includes(b2.error) || b2.error === 'api_unavailable')
 })
 
-test('create_agent_space caches a supported result', async () => {
+test('create_agent_space caches a supported result', {
+  skip: process.platform === 'win32' && 'macOS-only: tests the createMacSpace caching layer. The Windows code path (Ctrl+Win+D) intentionally does not cache — each call creates a new desktop.',
+}, async () => {
   const native = createMockNative()
   let invocations = 0
   native._setCreateAgentSpaceResult(() => {
@@ -686,7 +796,9 @@ test('create_agent_space caches a supported result', async () => {
   assert.equal(b2.created, false)
 })
 
-test('create_agent_space reports yabai scripting-addition setup requirement', async () => {
+test('create_agent_space reports yabai scripting-addition setup requirement', {
+  skip: process.platform === 'win32' && 'macOS-only: yabai is a macOS window manager and has no Windows equivalent.',
+}, async () => {
   const previousBackend = process.env.COMPUTER_USE_SPACES_BACKEND
   process.env.COMPUTER_USE_SPACES_BACKEND = 'yabai'
   try {
@@ -800,7 +912,9 @@ test('fill_form with all fields failing still returns structured JSON (not isErr
 
 // ── Example: get_app_dictionary cache hits on repeat ────────────────────────
 
-test('get_app_dictionary caches results and invalidates on PID change', async () => {
+test('get_app_dictionary caches results and invalidates on PID change', {
+  skip: process.platform === 'win32' && 'macOS-only: get_app_dictionary uses sdef, which is macOS-only. The Windows handler returns platform_unsupported — covered by the Windows-specific test below.',
+}, async () => {
   const native = createMockNative()
   let sdefCalls = 0
   const responses = new Map()
@@ -829,4 +943,49 @@ test('get_app_dictionary caches results and invalidates on PID change', async ()
   ])
   await session.dispatch('get_app_dictionary', { bundle_id: 'com.apple.mail' })
   assert.equal(sdefCalls, 2, 'PID change invalidates cache')
+})
+
+// ── Windows-specific test parallels ─────────────────────────────────────────
+
+test('get_app_dictionary returns platform_unsupported on Windows', {
+  skip: process.platform !== 'win32' && 'Windows-specific: validates the early-return for macOS-only sdef-based dictionary.',
+}, async () => {
+  const native = createMockNative()
+  const session = createSession({ native, spawnBounded: mockSpawnBounded(new Map()) })
+  const r = await session.dispatch('get_app_dictionary', { bundle_id: 'com.apple.mail' })
+  assert.ok(r.isError)
+  assert.match(r.content[0].text, /platform_unsupported/i)
+  assert.match(r.content[0].text, /get_ui_tree/i, 'must point to the Windows fallback')
+})
+
+test('create_agent_space (Windows): Ctrl+Win+D creates a new virtual desktop', {
+  skip: process.platform !== 'win32' && 'Windows-specific: the Windows code path drives Ctrl+Win+D and counts desktops via listSpaces.',
+}, async () => {
+  // Mock spaces before/after Ctrl+Win+D — the handler counts displays[0].spaces.length.
+  let spacesCallCount = 0
+  const native = createMockNative({
+    listSpaces() {
+      spacesCallCount++
+      return {
+        displays: [{
+          // Before the keypress: 1 desktop. After: 2 desktops (new uuid present).
+          spaces: spacesCallCount === 1
+            ? [{ uuid: 'desktop-1', index: 1 }]
+            : [{ uuid: 'desktop-1', index: 1 }, { uuid: 'desktop-2', index: 2 }],
+        }],
+      }
+    },
+  })
+  const session = createSession({ native, spawnBounded: mockSpawnBounded(new Map()) })
+
+  const r = await session.dispatch('create_agent_space', {})
+  assert.ok(!r.isError, 'Ctrl+Win+D path should not error')
+  const body = JSON.parse(r.content[0].text)
+  assert.equal(body.created, true, 'created must be true when afterCount > beforeCount')
+  assert.equal(body.space_id, 'desktop-2', 'space_id should be the new desktop uuid')
+  assert.equal(body.total_desktops, 2)
+  // Verify Ctrl+Win+D was actually sent.
+  const keyCalls = native.calls.filter(c => c.method === 'keyPress')
+  assert.equal(keyCalls.length, 1)
+  assert.deepEqual(keyCalls[0].args, ['ctrl+win+d'])
 })

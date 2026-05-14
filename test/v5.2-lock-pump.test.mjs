@@ -6,7 +6,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -126,11 +126,17 @@ test('Phase 1: lock with dead-PID holder is reclaimed', async () => {
 
 test('Phase 1: mutating tool returns structured locked_by_pid when another live PID holds the lock', async () => {
   const lockPath = newLockPath()
-  // Spawn a truly-detached background process that we can signal later.
-  // `nohup sleep 30 > /dev/null 2>&1 &` detaches under sh job control.
-  // We capture the new child's PID from $!.
-  const out = execFileSync('bash', ['-c', 'nohup sleep 30 >/dev/null 2>&1 & echo $!'], { encoding: 'utf8' }).trim()
-  const foreignPid = parseInt(out, 10)
+  // Spawn a detached Node subprocess that sleeps for 30s. We use Node's own
+  // binary (process.execPath) and child_process.spawn so this works identically
+  // on POSIX and Windows — bash + nohup are unavailable on stock Windows, and
+  // the previous implementation produced NaN PIDs there.
+  const child = spawn(
+    process.execPath,
+    ['-e', 'setTimeout(() => {}, 30000)'],
+    { detached: true, stdio: 'ignore' },
+  )
+  child.unref()
+  const foreignPid = child.pid
   assert.ok(Number.isFinite(foreignPid) && foreignPid > 0 && foreignPid !== process.pid,
     `spawned sleeper pid must be real and different from us (got ${foreignPid}, self=${process.pid})`)
 
@@ -146,6 +152,7 @@ test('Phase 1: mutating tool returns structured locked_by_pid when another live 
     assert.equal(body.error, 'locked_by_pid')
     assert.equal(body.lockingPid, foreignPid)
   } finally {
+    // process.kill(pid, 'SIGKILL') maps to TerminateProcess on Windows via libuv.
     try { process.kill(foreignPid, 'SIGKILL') } catch { /* ok */ }
     try { fs.unlinkSync(lockPath) } catch { /* ok */ }
   }
@@ -153,9 +160,11 @@ test('Phase 1: mutating tool returns structured locked_by_pid when another live 
 
 // ── Pump drains the runloop while a mutating call is in flight ──────────────
 
-test('Phase 1: pump fires drainRunloop while a mutating tool runs', async () => {
+test('Phase 1: pump fires drainRunloop while a mutating tool runs', {
+  skip: process.platform === 'win32' && 'pump is macOS-only — startPump() short-circuits on Windows (no CFRunLoop to drain). See Windows-specific test below.',
+}, async () => {
   const lockPath = newLockPath()
-  // 30ms delay in mouseClick gives the 1ms pump plenty of ticks.
+  // 30ms delay in mouseClick gives the 1ms pump plenty of ticks on macOS.
   const mock = createMockNative({ mouseClickDelayMs: 30 })
   const s = createSession({ native: mock, lockPath, ...LOCK_ON })
 
@@ -164,6 +173,23 @@ test('Phase 1: pump fires drainRunloop while a mutating tool runs', async () => 
 
   assert.ok(mock._drainCount() >= 5,
     `pump should have fired many times during a 30ms mutation (got ${mock._drainCount()})`)
+})
+
+test('Phase 1: pump does NOT fire on Windows (no CFRunLoop)', {
+  skip: process.platform !== 'win32' && 'Windows-specific: validates the IS_WINDOWS short-circuit in startPump().',
+}, async () => {
+  const lockPath = newLockPath()
+  const mock = createMockNative({ mouseClickDelayMs: 30 })
+  const s = createSession({ native: mock, lockPath, ...LOCK_ON })
+
+  assert.equal(mock._drainCount(), 0)
+  await s.dispatch('left_click', { coordinate: [10, 10], focus_strategy: 'none' })
+
+  // Windows has no runloop to pump — Win32 input dispatch via SendInput is
+  // synchronous and doesn't need a periodic drain. The native binding may
+  // still expose drainRunloop() as a no-op, but startPump() must skip it.
+  assert.equal(mock._drainCount(), 0,
+    `pump must not fire on Windows (got ${mock._drainCount()} drains)`)
 })
 
 // ── Observation tools do not pump either ────────────────────────────────────

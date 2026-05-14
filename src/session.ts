@@ -268,6 +268,34 @@ const TOOL_GUIDE_TABLE: ToolGuidePattern[] = [
       explanation:
         'Use the notification tool to send Windows toast notifications.',
     },
+    {
+      pattern: /\b(spreadsheet|cell|row|column|excel|workbook|xlsx)\b/i,
+      approach: 'scripting' as AutomationApproach,
+      toolSequence: ['run_script'],
+      explanation:
+        'Excel is COM-scriptable through PowerShell. Use `$x = New-Object -ComObject Excel.Application; $wb = $x.Workbooks.Open(<path>); $wb.Worksheets.Item(1).Range("A1").Value2` to read/write cells without GUI clicks. Remember to call `$wb.Close($true)` and `$x.Quit()` to release the COM instance.',
+    },
+    {
+      pattern: /\b(calendar|event|appointment|reminder|meeting|note|todo|task)\b/i,
+      approach: 'scripting' as AutomationApproach,
+      toolSequence: ['run_script'],
+      explanation:
+        'Classic Outlook is COM-scriptable: `$ol = New-Object -ComObject Outlook.Application; $appt = $ol.CreateItem(1); $appt.Subject = "..."; $appt.Start = (Get-Date).AddHours(1); $appt.Save()`. Important caveat: New Outlook for Windows (the UWP replacement rolling out via M365) does NOT expose COM — if `New-Object -ComObject Outlook.Application` errors with "Invalid class string", fall back to accessibility (`get_ui_tree` + `click_element`). Classic Outlook security updates run through 2029.',
+    },
+    {
+      pattern: /\b(play|pause|track|playlist|song|music|skip\s+track|next\s+track|previous\s+track|volume)\b/i,
+      approach: 'scripting' as AutomationApproach,
+      toolSequence: ['run_script'],
+      explanation:
+        'Windows has no universal scriptable music API. Use PowerShell + user32.dll P/Invoke to send media virtual-key codes — works across Spotify / Windows Media Player / YouTube Music / any Media Session-aware browser tab: `$sig = \'[DllImport("user32.dll")]public static extern void keybd_event(byte vk, byte scan, int flags, int extra);\'; $u = Add-Type -MemberDefinition $sig -Name Win32 -Namespace Win32API -PassThru; $u::keybd_event(0xB3, 0, 0, 0); $u::keybd_event(0xB3, 0, 2, 0)`. Codes: 0xB3 play/pause, 0xB0 next track, 0xB1 previous track, 0xAE volume down, 0xAF volume up, 0xAD volume mute.',
+    },
+    {
+      pattern: /\b(imessage|chat|sms|whatsapp|teams|discord|messenger|slack)\b/i,
+      approach: 'accessibility' as AutomationApproach,
+      toolSequence: ['get_ui_tree', 'set_value', 'click_element'],
+      explanation:
+        'Chat apps on Windows (Phone Link, Teams, Discord, WhatsApp, Slack, Messenger) do NOT expose stable automation APIs — Microsoft Graph covers Teams but requires OAuth. For UI-driven chat: find the message input via `get_ui_tree`, populate it with `set_value`, then `click_element` on the Send button. Confirm with the user before sending — chat messages are non-reversible.',
+    },
   ] as ToolGuidePattern[] : []),
   // ── macOS-specific entries ──────────────────────────────────────────────
   ...(process.platform === 'darwin' ? [
@@ -973,6 +1001,25 @@ export function createSession(opts: SessionOptions = {}): Session {
       _psExe = 'powershell'
     }
     return _psExe
+  }
+
+  // WinRT assembly loading via `[Type, Assembly, ContentType = WindowsRuntime]`
+  // is a Windows PowerShell 5.1 feature; PowerShell 7+ removed it (no WinRT
+  // projections without PowerShell.WindowsCompat or third-party modules). For
+  // toast notifications we therefore prefer `powershell` (5.1, built into
+  // Windows) over `pwsh`. Cache the resolved path. If 5.1 is unavailable, fall
+  // back to `pwsh` and let the caller surface the error; notification is the
+  // only WinRT-dependent tool today.
+  let _winrtPsExe: string | undefined
+  function getWinRTPowerShellExe(): string {
+    if (_winrtPsExe) return _winrtPsExe
+    try {
+      execFileSync('powershell', ['-NoProfile', '-Command', 'exit 0'], { timeout: 3000 })
+      _winrtPsExe = 'powershell'
+    } catch {
+      _winrtPsExe = getPowerShellExe()
+    }
+    return _winrtPsExe
   }
 
   type MacSpacesBackend = 'auto' | 'yabai' | 'mission_control' | 'cgs'
@@ -2503,8 +2550,13 @@ $xml.LoadXml(${powershellLiteral(`<toast><visual><binding template="ToastText02"
 $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier(${powershellLiteral(appId)}).Show($toast)
 `
-          const r = await spawnBounded(getPowerShellExe(), powershellEncodedArgs(ps), 10000)
-          return r.code === 0 ? ok('Notification sent') : { content: [{ type: 'text', text: r.stderr || 'Failed to send notification' }], isError: true }
+          const r = await spawnBounded(getWinRTPowerShellExe(), powershellEncodedArgs(ps), 10000)
+          if (r.code === 0) return ok('Notification sent')
+          const stderr = (r.stderr || '').trim()
+          const hint = /WindowsRuntime|Windows\.UI\.Notifications|ContentType/i.test(stderr)
+            ? ' (WinRT toast assemblies require Windows PowerShell 5.1; the legacy `[Type, Assembly, ContentType = WindowsRuntime]` syntax is unavailable in PowerShell 7+.)'
+            : ''
+          return { content: [{ type: 'text', text: (stderr || 'Failed to send notification') + hint }], isError: true }
         }
 
         case 'multi_select': {
