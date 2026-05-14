@@ -175,6 +175,21 @@ mod platform {
                 .map_err(|e| napi::Error::from_reason(format!("ElementFromHandle: {e}")))?;
             let cond = build_condition(automation, Some(role),
                 if label.is_empty() { None } else { Some(label) })?;
+            // Fast path: FindFirst short-circuits at the first match. FindAll
+            // forces UIA to enumerate every descendant cross-process — on
+            // heavy WPF / Shell-namespace UIs (Common File Dialog, large
+            // industrial apps) that walk has been measured at 60–90s while
+            // FindFirst on the same tree returns in <1s.
+            if !label.is_empty() {
+                if let Ok(elem) = root.FindFirst(TreeScope_Descendants, &cond) {
+                    if elem.CurrentName().is_ok() {
+                        return Ok(Some(elem));
+                    }
+                }
+            }
+            // Fallback for partial / case-folded labels: the exact-Name
+            // condition above would miss those, so walk via FindAll and
+            // filter client-side.
             let elems = root.FindAll(TreeScope_Descendants, &cond)
                 .map_err(|e| napi::Error::from_reason(format!("FindAll: {e}")))?;
             let count = elems.Length().unwrap_or(0);
